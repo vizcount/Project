@@ -1,0 +1,332 @@
+/**********************************************************************
+* FILENAME :        ReadingDataWithExtendedFetch.c
+*
+* DESCRIPTION :
+*       Example uses SQLExtendedFetch() to retrieve data using both row
+*           and column wise binding. SQLExtendedFetch is the ODBC version
+*           2 way of fetching data, now deprecated by SQLFetch and
+*           SQLFetchScroll, but needs supporting. Example is repeated
+*           to illustrate how to read data using both column-wise and
+*           row-wise binding.
+*
+* ODBC USAGE :
+*       Uses fixed SQL SELECT statement on TestTBL1
+*
+*       Read records using column-wise binding
+*           SQLSetStmtAttr() with SQL_ROWSET_SIZE to indicate a rowset
+*                            size of ROWSET_SIZE
+*           SQLExecDirect()  to execute the SELECT
+*           SQLBindCol()     to bind data to the 4 columns by giving the
+*                            address of the start of each column data and
+*                            len array of each column
+*           SQLExtendedFetch with SQL_FETCH_NEXT to get record sets in
+*                            blocks of ROWSET_SIZE until SQL_NO_DATA_FOUND
+*                            returned
+*                            display results in blocks of ROWSET_SIZE
+*
+*       Read records using row-wise binding
+*           SQLSetStmtAttr()   with SQL_ROWSET_SIZE to set number of rows
+*                              to fetch
+*           SQLSetStmtAttr()   with SQL_BIND_TYPE to set row size (sizeof
+*                              row structure/no of rows)
+*           SQLBindCol()       to bind data to the 4 columns by giving the
+*                              address of element zero of each column and
+*                              length in the row array
+*           SQLExtendedFetch() with SQL_FETCH_NEXT to get record sets in
+*                              blocks of ROWSET_SIZE until SQL_NO_DATA_FOUND
+*                              returned
+*                              display results in blocks of ROWSET_SIZE
+*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <sql.h>
+#include <sqlext.h>
+#include <string.h>
+
+#include "util.c"
+
+#define ROWSET_SIZE 3  // How many rows at a time
+
+int main () {
+
+    SQLHENV  henv  = SQL_NULL_HENV;   // Environment
+    SQLHDBC  hdbc  = SQL_NULL_HDBC;   // Connection handle
+    SQLHSTMT hstmt = SQL_NULL_HSTMT;  // Statement handle
+
+    SQLRETURN retcode;
+
+    SQLCHAR statement[]="SELECT FirstName,LastName,Address,City FROM TestTBL1";
+
+    // Column-wise binding data areas
+    // Uses Arrays of values and lengths
+    // Column 1    Column2     ... Column n
+    // |value|len| |value|len| ... |value|len|
+    // |value|len| |value|len| ... |value|len|
+    // |.....|...| |.....|...| ... |.....|...|
+    // |.....|...| |.....|...| ... |.....|...|
+    // |.....|...| |.....|...| ... |.....|...|
+    // |value|len| |value|len| ... |value|len|
+
+    SQLCHAR         FirstName[ROWSET_SIZE][255]; // value/length columns
+    SQLLEN          FirstName_l[ROWSET_SIZE];
+    SQLCHAR         LastName[ROWSET_SIZE][255];
+    SQLLEN          LastName_l[ROWSET_SIZE];
+    SQLCHAR         Address[ROWSET_SIZE][255];
+    SQLLEN          Address_l[ROWSET_SIZE];
+    SQLCHAR         City[ROWSET_SIZE][255];
+    SQLLEN          City_l[ROWSET_SIZE];
+
+    // Row-wise binding
+    // Uses an array of length/value pairs
+    //        Column 1  Column 2                      Column n
+    // Row 1 -> |Len|Value|Len|Value|...|.....|...|.....|Len|Value|
+    // Row 2 -> |Len|Value|Len|Value|...|.....|...|.....|Len|Value|
+    // ...   -> |Len|Value|Len|Value|...|.....|...|.....|Len|Value|
+    // ...   -> |Len|Value|Len|Value|...|.....|...|.....|Len|Value|
+    // Row n -> |Len|Value|Len|Value|...|.....|...|.....|Len|Value|
+
+    struct {
+        SQLLEN          FirstName_l;          // length/value rows
+        SQLCHAR         FirstName[255];
+        SQLLEN          LastName_l;
+        SQLCHAR         LastName[255];
+        SQLLEN          Address_l;
+        SQLCHAR         Address[255];
+        SQLLEN          City_l;
+        SQLCHAR         City[255];
+    } Row[ROWSET_SIZE];
+
+    SQLUSMALLINT     Row_Stat[ROWSET_SIZE];         // array of length/value pairs
+
+    // working vars
+    SQLULEN          pcrow;
+    int              i, row, max;
+    char padding[] = "          ";
+    char * val;
+    char plural[] = " ";
+
+    //
+    // Column-wise binding
+    //
+    retcode = SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &henv);
+    CHECK_ERROR(retcode, "SQLAllocHandle(SQL_HANDLE_ENV)",
+                henv, SQL_HANDLE_ENV);
+
+    retcode = SQLSetEnvAttr(henv, SQL_ATTR_ODBC_VERSION,
+                                        (SQLCHAR *)(void*)SQL_OV_ODBC3, -1);
+    CHECK_ERROR(retcode, "SQLSetEnvAttr(SQL_ATTR_ODBC_VERSION)",
+                henv, SQL_HANDLE_ENV);
+
+    retcode = SQLAllocHandle(SQL_HANDLE_DBC, henv, &hdbc);
+    CHECK_ERROR(retcode, "SQLAllocHandle(SQLAllocHandle)",
+                hdbc, SQL_HANDLE_DBC);
+
+    retcode = SQLSetConnectAttr(hdbc, SQL_LOGIN_TIMEOUT, (SQLPOINTER)10, 0);
+    CHECK_ERROR(retcode, "SQLSetConnectAttr(SQL_LOGIN_TIMEOUT)",
+                hdbc, SQL_HANDLE_DBC);
+
+    retcode = SQLConnect(hdbc, (SQLCHAR*) "DATASOURCE", SQL_NTS,
+                                        (SQLCHAR*) NULL, 0, NULL, 0);
+    CHECK_ERROR(retcode, "SQLConnect(DATASOURCE)",
+                hdbc, SQL_HANDLE_DBC);
+
+    retcode = SQLAllocHandle( SQL_HANDLE_STMT, hdbc, &hstmt);
+    CHECK_ERROR(retcode, "SQLAllocHandle(SQL_HANDLE_ENV)",
+                hstmt, SQL_HANDLE_STMT);
+
+    ///
+    // NOTE: THIS IS THE ODBC VERSION 2 WAY
+    // Retrieve record using Column-wise binding.
+    // Uses SQL_ROWSET_SIZE to do this. Must assume
+    // column binding unless told otherwise(?)
+    //
+    // Tell SQLExtendedFetch how many rows to fetch
+    //
+    retcode = SQLSetStmtAttr(hstmt, SQL_ROWSET_SIZE, (void*) ROWSET_SIZE, 0);
+    CHECK_ERROR(retcode, "SQLSetStmtAttr(SQL_ROWSET_SIZE)",
+                hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLExecDirect(hstmt, statement, SQL_NTS);
+    CHECK_ERROR(retcode, "SQLExecDirect()",
+                hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 1, SQL_C_CHAR,
+                         (SQLPOINTER) FirstName, 255, (SQLLEN *) &FirstName_l);
+    CHECK_ERROR(retcode, "SQLBindCol(1)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 2, SQL_C_CHAR,
+                         (SQLPOINTER) LastName, 255, (SQLLEN *) &LastName_l);
+    CHECK_ERROR(retcode, "SQLBindCol(2)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 3, SQL_C_CHAR,
+                         (SQLPOINTER) Address, 255, (SQLLEN *) &Address_l);
+    CHECK_ERROR(retcode, "SQLBindCol(3)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 4, SQL_C_CHAR,
+                         (SQLPOINTER) City, 255, (SQLLEN *) &City_l);
+    CHECK_ERROR(retcode, "SQLBindCol(4)", hstmt, SQL_HANDLE_STMT);
+
+    /* Fetch ROWSET_SIZE rows at a time, and display */
+
+    max=strlen(padding);
+
+    printf("\nColumn Based Results ... \n");
+    printf("\nRow FirstName LastName  Address   City");
+    printf("\n--- --------- --------- --------- -------\n");
+    row=1;
+    while ((retcode = SQLExtendedFetch(hstmt,
+                    SQL_FETCH_NEXT, 0, &pcrow, Row_Stat)) == SQL_SUCCESS) {
+
+        strcpy(plural, "s");
+        if (pcrow==1) strcpy(plural, "");
+        if (pcrow<ROWSET_SIZE) {
+            printf("Last %i Row%s \n", (int)pcrow, plural);
+        }
+        else {
+            printf("Next %i Row%s \n", (int)pcrow, plural);
+        }
+
+        for (i = 0; i < pcrow; i++) {
+            val = itoa(row++);
+            padOut(val, padding, max-6);
+            printf("%s%s", val, padding);
+            free (val);
+            padOut (rtrim(FirstName[i], ' '), padding, max);
+            printf("%s%s", FirstName[i], padding);
+            padOut (rtrim(LastName[i], ' '), padding, max);
+            printf("%s%s", LastName[i],padding);
+            padOut (rtrim(Address[i], ' '), padding, max);
+            printf("%s%s", Address[i], padding);
+            padOut (rtrim(City[i], ' '), padding, max);
+            printf("%s%s\n", City[i],padding);
+        }
+
+        //
+        // If we read fewer rows than the ROWSET, we've finished
+        //
+        if (pcrow < ROWSET_SIZE)
+            break;
+    }                           /* endwhile */
+
+    // Last status should be SQL_NO_DATA_FOUND
+    if (retcode != SQL_NO_DATA_FOUND) {
+        CHECK_ERROR(retcode, "SQLExtendedFetch(SQL_FETCH_NEXT)",
+                    hstmt, SQL_HANDLE_STMT);
+    }
+
+    retcode = SQLFreeHandle(SQL_HANDLE_STMT, hstmt);
+
+    //
+    // NOTE: THIS IS THE ODBC VERSION 2 WAY
+    // Retrieve same data using Row-wise binding
+    // Uses SQL_ROWSET_SIZE and SQL_BIND_TYPE to
+    // do this.
+    //
+
+    //
+    // Row-wise binding
+    //
+    retcode = SQLAllocHandle( SQL_HANDLE_STMT, hdbc, &hstmt);
+    CHECK_ERROR(retcode, "SQLAllocHandle(SQL_HANDLE_STMT)",
+                hstmt, SQL_HANDLE_STMT);
+
+    // Set maximum number of rows to receive with each extended fetch
+    retcode = SQLSetStmtAttr(hstmt, SQL_ROWSET_SIZE, (void*) ROWSET_SIZE, 0);
+    CHECK_ERROR(retcode, "SQLSetStmtAttr(SQL_ROWSET_SIZE)",
+                hstmt, SQL_HANDLE_STMT);
+
+    // Set SQL_BIND_TYPE to size of one row, used as offset for
+    // each bound column
+    retcode = SQLSetStmtAttr(hstmt, SQL_BIND_TYPE,
+                                    (void*) (sizeof(Row) / ROWSET_SIZE), 0);
+    CHECK_ERROR(retcode, "SQLSetStmtAttr(SQL_BIND_TYPE)",
+                hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLExecDirect(hstmt, statement, SQL_NTS);
+    CHECK_ERROR(retcode, "SQLExecDirect()", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 1, SQL_C_CHAR,
+                                  (SQLPOINTER) &Row[0].FirstName, 255,
+                                  &Row[0].FirstName_l);
+    CHECK_ERROR(retcode, "SQLBindCol(1)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 2, SQL_C_CHAR,
+                                  (SQLPOINTER) Row[0].LastName, 255,
+                                  &Row[0].LastName_l);
+    CHECK_ERROR(retcode, "SQLBindCol(2)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 3, SQL_C_CHAR,
+                                  (SQLPOINTER) &Row[0].Address, 255,
+                                  &Row[0].Address_l);
+    CHECK_ERROR(retcode, "SQLBindCol(3)", hstmt, SQL_HANDLE_STMT);
+
+    retcode = SQLBindCol(hstmt, 4, SQL_C_CHAR,
+                                  (SQLPOINTER) Row[0].City, 255,
+                                  &Row[0].City_l);
+    CHECK_ERROR(retcode, "SQLBindCol(4)", hstmt, SQL_HANDLE_STMT);
+
+    /* Fetch ROWSET_SIZE rows at a time, and display */
+    printf("\nRow Based Results ... \n");
+    printf("\nRow FirstName LastName  Address   City");
+    printf("\n--- --------- --------- --------- -------\n");
+    row=1;
+    while ((retcode = SQLExtendedFetch(hstmt,
+                    SQL_FETCH_NEXT, 0, &pcrow, Row_Stat)) == SQL_SUCCESS) {
+
+        strcpy(plural, "s");
+        if (pcrow==1) strcpy(plural, "");
+        if (pcrow<ROWSET_SIZE) {
+            printf("Last %i Row%s \n", (int)pcrow, plural);
+        }
+        else {
+            printf("Next %i Row%s \n", (int)pcrow, plural);
+        }
+
+        for (i = 0; i < pcrow; i++) {
+            val = itoa(row++);
+            padOut(val, padding, max-6);
+            printf("%s%s", val, padding);
+            free (val);
+            padOut (rtrim(Row[i].FirstName, ' '), padding, max);
+            printf("%s%s", Row[i].FirstName, padding);
+            padOut (rtrim(Row[i].LastName, ' '), padding, max);
+            printf("%s%s", Row[i].LastName,padding);
+            padOut (rtrim(Row[i].Address, ' '), padding, max);
+            printf("%s%s", Row[i].Address, padding);
+            padOut (rtrim(Row[i].City, ' '), padding, max);
+            printf("%s%s\n", Row[i].City,padding);
+        }
+
+        //
+        // If we read fewer rows than the ROWSET, we've finished
+        //
+        if (pcrow < ROWSET_SIZE)
+            break;
+    }
+
+    // Last status should be SQL_NO_DATA_FOUND
+    if (retcode != SQL_NO_DATA_FOUND) {
+        CHECK_ERROR(retcode, "SQLExtendedFetch(SQL_FETCH_NEXT)", hstmt, SQL_HANDLE_STMT);
+    }
+
+exit:
+
+    printf ("\nComplete.\n");
+
+    // Free handles
+    // Statement
+    if (hstmt != SQL_NULL_HSTMT)
+        SQLFreeHandle(SQL_HANDLE_STMT, hstmt);
+
+    // Connection
+    if (hdbc != SQL_NULL_HDBC) {
+        SQLDisconnect(hdbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, hdbc);
+    }
+
+    // Environment
+    if (henv != SQL_NULL_HENV)
+        SQLFreeHandle(SQL_HANDLE_ENV, henv);
+
+    return 0;
+}
